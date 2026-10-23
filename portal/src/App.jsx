@@ -1,108 +1,218 @@
 import { useState, useEffect } from "react";
 
-// Baad mein Anuma ki API ka link yahan daalna, abhi mock data chal raha hai
 const API = "https://ook5dsr71i.execute-api.ap-southeast-2.amazonaws.com";
+const USER = "demo";
 
 const box = { border: "1px solid #ccc", borderRadius: 8, padding: 12, marginBottom: 10 };
 const input = { padding: 8, marginRight: 8, marginBottom: 8 };
 const btn = { padding: "8px 14px", cursor: "pointer", marginRight: 8 };
 
+async function get(path) {
+  const r = await fetch(API + path);
+  return r.json();
+}
+
+async function post(path, body) {
+  const r = await fetch(API + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+const asList = (x) => (Array.isArray(x) ? x : []);
+
 export default function App() {
-  const [tab, setTab] = useState("commands");
+  const [tab, setTab] = useState("talk");
+  const [commands, setCommands] = useState([]);
+  const [shortcuts, setShortcuts] = useState([]);
+  const [variants, setVariants] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [devices, setDevices] = useState([]);
+  const [error, setError] = useState("");
 
-  const [commands, setCommands] = useState([
-    { naam: "Light off", device: "light", action: "off", variants: ["lye awf", "lait of"] },
-    { naam: "Fan on", device: "fan", action: "on", variants: ["fan aan"] },
-  ]);
-  const [shortcuts, setShortcuts] = useState([
-    { naam: "Bedtime", steps: "light off, fan on, door lock" },
-  ]);
-  const learned = [
-    { heard: "lye awf", matched: "Light off", count: 3 },
-    { heard: "fan aan", matched: "Fan on", count: 1 },
-  ];
-  const logs = [
-    { time: "10:01", heard: "lye awf", matched: "Light off", confirmed: "haan" },
-    { time: "10:05", heard: "bedtime", matched: "Bedtime", confirmed: "haan" },
-  ];
-  const [devices, setDevices] = useState({ light: "on", fan: "off", door: "unlocked", tv: "off" });
+  const loadAll = async () => {
+    try {
+      const [c, s, v, l, d] = await Promise.all([
+        get("/commands"),
+        get("/shortcuts"),
+        get("/variants"),
+        get("/logs"),
+        get("/devices"),
+      ]);
+      setCommands(asList(c));
+      setShortcuts(asList(s));
+      setVariants(asList(v));
+      setLogs(asList(l));
+      setDevices(asList(d));
+      setError("");
+    } catch (e) {
+      setError("Could not reach the server. Check the API link or CORS.");
+    }
+  };
 
-  // Har 2 second mein refresh. Baad mein yahan API se data aayega.
   useEffect(() => {
-    const t = setInterval(() => {
-      if (API) {
-         fetch(API + "/devices")
-  .then((r) => r.json())
-  .then((list) => {
-    const obj = {};
-    list.forEach((d) => { obj[d.deviceName] = d.state; });
-    setDevices(obj);
-  })
-  .catch(() => {});
-      }
-    }, 2000);
+    loadAll();
+    const t = setInterval(loadAll, 2000);
     return () => clearInterval(t);
   }, []);
 
-  // Command add karne ka form
-  const [naam, setNaam] = useState("");
-  const [device, setDevice] = useState("light");
-  const [action, setAction] = useState("on");
-  const [variants, setVariants] = useState("");
+  // ---------- Add command ----------
+  const [cName, setCName] = useState("");
+  const [cDevice, setCDevice] = useState("light");
+  const [cAction, setCAction] = useState("on");
 
-  const addCommand = () => {
-    if (!naam) return;
-    setCommands([...commands, { naam, device, action, variants: variants.split(",").map((v) => v.trim()).filter(Boolean) }]);
-    setNaam(""); setVariants("");
+  const addCommand = async () => {
+    if (!cName) return;
+    const commandId = cDevice + "_" + cAction;
+    await post("/commands", { commandId, name: cName, device: cDevice, action: cAction });
+    setCName("");
+    loadAll();
   };
 
-  // Shortcut banane ka form
-  const [sNaam, setSNaam] = useState("");
+  // ---------- Add shortcut ----------
+  const [sName, setSName] = useState("");
   const [sSteps, setSSteps] = useState("");
-  const addShortcut = () => {
-    if (!sNaam) return;
-    setShortcuts([...shortcuts, { naam: sNaam, steps: sSteps }]);
-    setSNaam(""); setSSteps("");
+
+  const addShortcut = async () => {
+    if (!sName) return;
+    const steps = sSteps.split(",").map((s) => s.trim()).filter(Boolean);
+    await post("/shortcuts", { shortcutName: sName.toLowerCase(), steps });
+    setSName("");
+    setSSteps("");
+    loadAll();
+  };
+
+  const runShortcut = async (name) => {
+    await post("/runshortcut", { userId: USER, shortcutName: name });
+    loadAll();
+  };
+
+  // ---------- Talk to VoiceBridge ----------
+  const [talkText, setTalkText] = useState("");
+  const [reply, setReply] = useState("Type a command, for example: light off");
+  const [pending, setPending] = useState(null);
+
+  const findMatch = (text) => {
+    const t = text.trim().toLowerCase();
+    if (!t) return null;
+    const sc = shortcuts.find((s) => s.shortcutName.toLowerCase() === t);
+    if (sc) return { type: "shortcut", item: sc, heard: t };
+    const v = variants.find((x) => x.heardText.toLowerCase() === t);
+    if (v) {
+      const c = commands.find((x) => x.commandId === v.commandId);
+      if (c) return { type: "command", item: c, heard: t };
+    }
+    const c = commands.find((x) => x.name.toLowerCase() === t);
+    if (c) return { type: "command", item: c, heard: t };
+    return null;
+  };
+
+  const sendTalk = () => {
+    const m = findMatch(talkText);
+    if (!m) {
+      setPending(null);
+      setReply("Sorry, I did not understand. Please say it again.");
+      return;
+    }
+    setPending(m);
+    if (m.type === "shortcut") {
+      setReply('Run the shortcut "' + m.item.shortcutName + '"?');
+    } else {
+      setReply('Do you want me to do "' + m.item.name + '"?');
+    }
+  };
+
+  const answerYes = async () => {
+    if (!pending) return;
+    if (pending.type === "shortcut") {
+      await post("/runshortcut", { userId: USER, shortcutName: pending.item.shortcutName });
+      setReply('Done. Ran the shortcut "' + pending.item.shortcutName + '".');
+    } else {
+      const res = await post("/perform", {
+        userId: USER,
+        deviceName: pending.item.device,
+        action: pending.item.action,
+        heard: pending.heard,
+      });
+      setReply("Done. " + (res.deviceName || pending.item.device) + " is now " + (res.state || pending.item.action) + ".");
+    }
+    setPending(null);
+    setTalkText("");
+    loadAll();
+  };
+
+  const answerNo = () => {
+    setPending(null);
+    setReply("Okay, cancelled.");
   };
 
   const tabs = [
+    ["talk", "Talk to VoiceBridge"],
     ["commands", "Commands"],
     ["shortcuts", "Shortcuts"],
-    ["learned", "Seekha hua"],
+    ["learned", "Learned"],
     ["logs", "Logs"],
     ["home", "Virtual Home"],
   ];
 
   return (
-    <div style={{ maxWidth: 700, margin: "0 auto", padding: 20, fontFamily: "sans-serif" }}>
+    <div style={{ maxWidth: 760, margin: "0 auto", padding: 20, fontFamily: "sans-serif" }}>
       <h1>VoiceBridge Caregiver Portal</h1>
+      {error && <p style={{ color: "red" }}>{error}</p>}
+
       <div style={{ marginBottom: 16 }}>
         {tabs.map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)}
-            style={{ ...btn, background: tab === key ? "#2563eb" : "#eee", color: tab === key ? "white" : "black", border: "none", borderRadius: 6 }}>
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            style={{ ...btn, marginBottom: 6, background: tab === key ? "#2563eb" : "#eee", color: tab === key ? "white" : "black", border: "none", borderRadius: 6 }}
+          >
             {label}
           </button>
         ))}
       </div>
 
+      {tab === "talk" && (
+        <div>
+          <h2>Talk to VoiceBridge</h2>
+          <input
+            style={{ ...input, width: 320 }}
+            placeholder="Type what you would say, e.g. light off"
+            value={talkText}
+            onChange={(e) => setTalkText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && sendTalk()}
+          />
+          <button style={btn} onClick={sendTalk}>Send</button>
+          <div style={{ ...box, background: "#f3f6ff", marginTop: 10 }}>
+            <b>VoiceBridge:</b> {reply}
+            {pending && (
+              <div style={{ marginTop: 10 }}>
+                <button style={btn} onClick={answerYes}>Yes</button>
+                <button style={btn} onClick={answerNo}>No</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {tab === "commands" && (
         <div>
-          <h2>Command add karo</h2>
-          <input style={input} placeholder="Naam (jaise Light off)" value={naam} onChange={(e) => setNaam(e.target.value)} />
-          <select style={input} value={device} onChange={(e) => setDevice(e.target.value)}>
+          <h2>Add a command</h2>
+          <input style={input} placeholder="Name (e.g. tv on)" value={cName} onChange={(e) => setCName(e.target.value)} />
+          <select style={input} value={cDevice} onChange={(e) => setCDevice(e.target.value)}>
             <option>light</option><option>fan</option><option>door</option><option>tv</option>
           </select>
-          <select style={input} value={action} onChange={(e) => setAction(e.target.value)}>
+          <select style={input} value={cAction} onChange={(e) => setCAction(e.target.value)}>
             <option>on</option><option>off</option><option>lock</option><option>unlock</option>
           </select>
-          <br />
-          <input style={{ ...input, width: 360 }} placeholder="Bigade roop, comma se alag (lye awf, lait of)" value={variants} onChange={(e) => setVariants(e.target.value)} />
           <button style={btn} onClick={addCommand}>Add</button>
           <h3>Saved commands</h3>
-          {commands.map((c, i) => (
-            <div key={i} style={box}>
-              <b>{c.naam}</b>: {c.device} → {c.action}<br />
-              Bigade roop: {c.variants.join(", ") || "koi nahi"}
+          {commands.length === 0 && <p>No commands yet.</p>}
+          {commands.map((c) => (
+            <div key={c.commandId} style={box}>
+              <b>{c.name}</b>: {c.device} → {c.action} <small>(id: {c.commandId})</small>
             </div>
           ))}
         </div>
@@ -110,22 +220,30 @@ export default function App() {
 
       {tab === "shortcuts" && (
         <div>
-          <h2>Shortcut banao</h2>
-          <input style={input} placeholder="Naam (jaise Bedtime)" value={sNaam} onChange={(e) => setSNaam(e.target.value)} />
-          <input style={{ ...input, width: 320 }} placeholder="Steps, comma se alag" value={sSteps} onChange={(e) => setSSteps(e.target.value)} />
+          <h2>Create a shortcut</h2>
+          <input style={input} placeholder="Name (e.g. movie)" value={sName} onChange={(e) => setSName(e.target.value)} />
+          <input style={{ ...input, width: 300 }} placeholder="Command IDs, comma separated (light_off, tv_on)" value={sSteps} onChange={(e) => setSSteps(e.target.value)} />
           <button style={btn} onClick={addShortcut}>Add</button>
           <h3>Saved shortcuts</h3>
-          {shortcuts.map((s, i) => (
-            <div key={i} style={box}><b>{s.naam}</b><br />Steps: {s.steps}</div>
+          {shortcuts.length === 0 && <p>No shortcuts yet.</p>}
+          {shortcuts.map((s) => (
+            <div key={s.shortcutName} style={box}>
+              <b>{s.shortcutName}</b><br />
+              Steps: {(s.steps || []).join(", ")}<br />
+              <button style={{ ...btn, marginTop: 8 }} onClick={() => runShortcut(s.shortcutName)}>Run now</button>
+            </div>
           ))}
         </div>
       )}
 
       {tab === "learned" && (
         <div>
-          <h2>Alexa ne kya seekha</h2>
-          {learned.map((l, i) => (
-            <div key={i} style={box}>"{l.heard}" → <b>{l.matched}</b> ({l.count} baar)</div>
+          <h2>What VoiceBridge has learned</h2>
+          {variants.length === 0 && <p>Nothing learned yet.</p>}
+          {variants.map((v, i) => (
+            <div key={i} style={box}>
+              "{v.heardText}" → <b>{v.commandId}</b> ({v.count} times)
+            </div>
           ))}
         </div>
       )}
@@ -133,8 +251,11 @@ export default function App() {
       {tab === "logs" && (
         <div>
           <h2>Logs</h2>
+          {logs.length === 0 && <p>No logs yet.</p>}
           {logs.map((l, i) => (
-            <div key={i} style={box}>{l.time} | suna: "{l.heard}" | match: {l.matched} | confirm: {l.confirmed}</div>
+            <div key={i} style={box}>
+              {new Date(Number(l.time)).toLocaleString()} | heard: "{l.heard}" | matched: {l.matched} | confirmed: {String(l.confirmed)}
+            </div>
           ))}
         </div>
       )}
@@ -142,11 +263,11 @@ export default function App() {
       {tab === "home" && (
         <div>
           <h2>Virtual Home</h2>
-          <p>Har 2 second mein refresh hota hai.</p>
-          {Object.entries(devices).map(([name, state]) => (
-            <div key={name} style={{ ...box, display: "flex", justifyContent: "space-between" }}>
-              <b>{name.toUpperCase()}</b>
-              <span>{state}</span>
+          <p>Refreshes every 2 seconds.</p>
+          {devices.map((d) => (
+            <div key={d.deviceName} style={{ ...box, display: "flex", justifyContent: "space-between" }}>
+              <b>{d.deviceName.toUpperCase()}</b>
+              <span>{d.state}</span>
             </div>
           ))}
         </div>
