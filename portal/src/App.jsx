@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 
 // Baad mein Anuma ki API ka link yahan daalna, abhi mock data chal raha hai
-const API = "";
+const API = "https://ook5dsr71i.execute-api.ap-southeast-2.amazonaws.com";
 
 const box = { border: "1px solid #ccc", borderRadius: 8, padding: 12, marginBottom: 10 };
 const input = { padding: 8, marginRight: 8, marginBottom: 8 };
@@ -31,7 +31,14 @@ export default function App() {
   useEffect(() => {
     const t = setInterval(() => {
       if (API) {
-        fetch(API + "/devices").then((r) => r.json()).then(setDevices).catch(() => {});
+         fetch(API + "/devices")
+  .then((r) => r.json())
+  .then((list) => {
+    const obj = {};
+    list.forEach((d) => { obj[d.deviceName] = d.state; });
+    setDevices(obj);
+  })
+  .catch(() => {});
       }
     }, 2000);
     return () => clearInterval(t);
